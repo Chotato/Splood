@@ -219,7 +219,7 @@ export default function App() {
                   
                   <div className="flex gap-2">
                     <button className="btn-secondary" style={{ flex: 1 }} onClick={() => removeAlert(alert.id)}>Ignore</button>
-                    <button className="btn-primary" style={{ flex: 1 }} onClick={() => { alert('Splood request sent!'); removeAlert(alert.id); }}>Splood!</button>
+                    <button className="btn-primary" style={{ flex: 1 }} onClick={() => { window.alert('Splood request sent!'); removeAlert(alert.id); }}>Splood!</button>
                   </div>
                 </div>
               ))}
