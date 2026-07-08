@@ -12,6 +12,8 @@ export const metadata: Metadata = {
   description: "A food sharing and social app to split meals and make friends.",
 };
 
+import { AuthProvider } from "@/context/AuthContext";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -20,9 +22,11 @@ export default function RootLayout({
   return (
     <html lang="en" className={inter.variable}>
       <body>
-        <div className="app-container">
-          {children}
-        </div>
+        <AuthProvider>
+          <div className="app-container">
+            {children}
+          </div>
+        </AuthProvider>
       </body>
     </html>
   );

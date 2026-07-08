@@ -40,23 +40,148 @@ const FireIcon = () => (
   </svg>
 );
 
-// Mock Data
-const MOCK_ALERTS = [
+// Initial Mock Data
+const INITIAL_ALERTS = [
   { id: 1, user: "Alex M.", restaurant: "Spice Symphony", dish: "Chicken Biryani (Large)", match: 98, distance: "0.4 miles", time: "10 mins ago" },
   { id: 2, user: "Sam T.", restaurant: "Pizza Paradiso", dish: "Large Pepperoni & Mushroom", match: 85, distance: "1.2 miles", time: "25 mins ago" },
   { id: 3, user: "Jordan L.", restaurant: "Sushi Zen", dish: "Deluxe Sushi Boat for 2", match: 92, distance: "0.8 miles", time: "1 hour ago" },
 ];
 
+import { useAuth } from "@/context/AuthContext";
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
+import { auth } from "@/lib/firebase";
+
 export default function App() {
   const [activeTab, setActiveTab] = useState("feed");
+  const [alerts, setAlerts] = useState(INITIAL_ALERTS);
+  
+  const [restaurant, setRestaurant] = useState("");
+  const [dish, setDish] = useState("");
+  const [time, setTime] = useState("Now");
+  
+  const [displayName, setDisplayName] = useState("");
+  const [profileMessage, setProfileMessage] = useState("");
+  const { user, loading, logout } = useAuth();
+  
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+      }
+    } catch (err: any) {
+      setAuthError(err.message);
+    }
+  };
+
+  const removeAlert = (id: number) => {
+    setAlerts(alerts.filter(a => a.id !== id));
+  };
+
+  const handleBroadcast = () => {
+    if (!restaurant || !dish) return;
+    const newAlert = {
+      id: Date.now(),
+      user: user?.displayName || user?.email?.split('@')[0] || "You",
+      restaurant,
+      dish,
+      match: 100,
+      distance: "0.0 miles",
+      time: "Just now"
+    };
+    setAlerts([newAlert, ...alerts]);
+    setRestaurant("");
+    setDish("");
+    setTime("Now");
+    setActiveTab("feed");
+  };
+
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    try {
+      await updateProfile(user, { displayName: displayName || user.displayName || "" });
+      setProfileMessage("Profile updated successfully!");
+      setTimeout(() => setProfileMessage(""), 3000);
+    } catch (error: any) {
+      setProfileMessage("Error updating profile.");
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex-col items-center justify-center" style={{ minHeight: "100vh" }}>
+        <div className="text-primary" style={{ fontSize: "1.5rem", fontWeight: "bold" }}>Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="flex-col p-4 items-center justify-center" style={{ minHeight: "100vh" }}>
+        <div className="card" style={{ width: "100%", maxWidth: "400px" }}>
+          <h2 style={{ fontSize: '1.5rem', fontWeight: 600, marginBottom: '16px', textAlign: 'center' }}>
+            {isLogin ? "Welcome Back" : "Create Account"}
+          </h2>
+          <form onSubmit={handleAuth} className="flex-col gap-4">
+            <div>
+              <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Email</label>
+              <input 
+                type="email" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com" 
+                required
+                style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} 
+              />
+            </div>
+            <div>
+              <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Password</label>
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••" 
+                required
+                style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} 
+              />
+            </div>
+            {authError && <div style={{ color: "var(--danger)", fontSize: "0.9rem" }}>{authError}</div>}
+            <button type="submit" className="btn-primary mt-2" style={{ width: '100%' }}>
+              {isLogin ? "Log In" : "Sign Up"}
+            </button>
+          </form>
+          <div className="text-center mt-4 text-secondary" style={{ fontSize: "0.9rem" }}>
+            {isLogin ? "Don't have an account? " : "Already have an account? "}
+            <button 
+              onClick={() => setIsLogin(!isLogin)} 
+              style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', padding: 0 }}
+            >
+              {isLogin ? "Sign up" : "Log in"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>
       <header className="glass-header">
         <div className="logo-text">SPLOOD</div>
-        <button className="btn-secondary" style={{ padding: '8px', borderRadius: '50%' }}>
-          <ProfileIcon />
-        </button>
+        {activeTab !== 'profile' && (
+           <button className="btn-secondary" style={{ padding: '8px', borderRadius: '50%' }} onClick={() => setActiveTab('profile')}>
+             <ProfileIcon />
+           </button>
+        )}
       </header>
 
       <main className="p-4" style={{ minHeight: 'calc(100vh - 140px)' }}>
@@ -65,7 +190,7 @@ export default function App() {
             <h2 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '8px' }}>Nearby Sploods</h2>
             
             <div className="flex-col gap-4">
-              {MOCK_ALERTS.map(alert => (
+              {alerts.map(alert => (
                 <div key={alert.id} className="card">
                   <div className="flex justify-between items-center mb-4">
                     <div className="flex items-center gap-2">
@@ -93,8 +218,8 @@ export default function App() {
                   </div>
                   
                   <div className="flex gap-2">
-                    <button className="btn-secondary" style={{ flex: 1 }}>Ignore</button>
-                    <button className="btn-primary" style={{ flex: 1 }}>Splood!</button>
+                    <button className="btn-secondary" style={{ flex: 1 }} onClick={() => removeAlert(alert.id)}>Ignore</button>
+                    <button className="btn-primary" style={{ flex: 1 }} onClick={() => { alert('Splood request sent!'); removeAlert(alert.id); }}>Splood!</button>
                   </div>
                 </div>
               ))}
@@ -110,17 +235,17 @@ export default function App() {
               <div className="flex-col gap-4">
                 <div>
                   <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Select Restaurant</label>
-                  <input type="text" placeholder="e.g. Spice Symphony" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} />
+                  <input type="text" value={restaurant} onChange={(e) => setRestaurant(e.target.value)} placeholder="e.g. Spice Symphony" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} />
                 </div>
                 
                 <div>
                   <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>What do you want to split?</label>
-                  <input type="text" placeholder="e.g. Chicken Biryani" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} />
+                  <input type="text" value={dish} onChange={(e) => setDish(e.target.value)} placeholder="e.g. Chicken Biryani" style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} />
                 </div>
                 
                 <div>
                   <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Time</label>
-                  <select style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none', appearance: 'none' }}>
+                  <select value={time} onChange={(e) => setTime(e.target.value)} style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none', appearance: 'none' }}>
                     <option>Now</option>
                     <option>In 30 mins</option>
                     <option>In 1 hour</option>
@@ -128,7 +253,7 @@ export default function App() {
                   </select>
                 </div>
 
-                <button className="btn-primary mt-4" style={{ width: '100%' }}>Broadcast Alert</button>
+                <button className="btn-primary mt-4" style={{ width: '100%' }} onClick={handleBroadcast}>Broadcast Alert</button>
               </div>
             </div>
           </div>
@@ -138,6 +263,44 @@ export default function App() {
           <div className="flex-col gap-4 items-center justify-center" style={{ height: '50vh' }}>
             <ChatIcon />
             <p className="text-secondary">No active sploods yet.</p>
+          </div>
+        )}
+
+        {activeTab === "profile" && (
+          <div className="flex-col gap-4">
+            <h2 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '8px' }}>Your Profile</h2>
+            
+            <div className="card">
+              <form onSubmit={handleUpdateProfile} className="flex-col gap-4">
+                <div>
+                  <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Email</label>
+                  <div style={{ padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-hover)', color: 'var(--text-secondary)' }}>
+                    {user?.email}
+                  </div>
+                </div>
+                
+                <div>
+                  <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Display Name</label>
+                  <input 
+                    type="text" 
+                    value={displayName || user?.displayName || ""} 
+                    onChange={(e) => setDisplayName(e.target.value)} 
+                    placeholder="Enter display name" 
+                    style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} 
+                  />
+                </div>
+                
+                {profileMessage && <div style={{ color: 'var(--success)', fontSize: '0.9rem' }}>{profileMessage}</div>}
+                
+                <button type="submit" className="btn-primary mt-2" style={{ width: '100%' }}>Update Profile</button>
+              </form>
+              
+              <div style={{ marginTop: '24px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '24px' }}>
+                <button className="btn-secondary" style={{ width: '100%', color: 'var(--danger)' }} onClick={logout}>
+                  Log Out
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </main>
@@ -156,6 +319,10 @@ export default function App() {
         <button className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
           <ChatIcon />
           <span>Chat</span>
+        </button>
+        <button className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => setActiveTab('profile')}>
+          <ProfileIcon />
+          <span>Profile</span>
         </button>
       </nav>
     </>

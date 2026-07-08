@@ -81,7 +81,7 @@ button {
 .text-secondary { color: var(--text-secondary); }
 
 .flex { display: flex; }
-.flex-col { flex-direction: column; }
+.flex-col { display: flex; flex-direction: column; }
 .items-center { align-items: center; }
 .justify-center { justify-content: center; }
 .justify-between { justify-content: space-between; }
