@@ -42,13 +42,25 @@ const FireIcon = () => (
 
 import { useAuth } from "@/context/AuthContext";
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
-import { collection, addDoc, doc, setDoc, getDoc, onSnapshot, query, orderBy } from "firebase/firestore";
+import { collection, addDoc, doc, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, query, orderBy, where } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useEffect } from "react";
 import { calculateDistance } from "@/lib/geo";
 import dynamic from "next/dynamic";
 
 const MapPicker = dynamic(() => import("@/components/MapPicker"), { ssr: false });
+
+function getTimeAgo(timestamp: number) {
+  if (!timestamp) return "Just now";
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return "Just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min${minutes > 1 ? 's' : ''} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr${hours > 1 ? 's' : ''} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days > 1 ? 's' : ''} ago`;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("feed");
@@ -65,6 +77,13 @@ export default function App() {
   // Temporary state for the map picker before saving
   const [mapLat, setMapLat] = useState<number | null>(null);
   const [mapLng, setMapLng] = useState<number | null>(null);
+  
+  // Chat state
+  const [chats, setChats] = useState<any[]>([]);
+  const [activeChat, setActiveChat] = useState<any>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [newMessage, setNewMessage] = useState("");
+  const [mySploods, setMySploods] = useState<any[]>([]);
   
   const [profileMessage, setProfileMessage] = useState("");
   const { user, loading, logout } = useAuth();
@@ -98,6 +117,10 @@ export default function App() {
       const fetchedAlerts: any[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
+        
+        // Exclude alerts older than 1 hour (3600000 ms)
+        if (Date.now() - (data.createdAt || 0) > 3600000) return;
+        
         const dist = calculateDistance(userProfile.lat, userProfile.lng, data.lat, data.lng);
         
         if (dist <= userProfile.searchRadius) {
@@ -112,6 +135,47 @@ export default function App() {
     });
     return () => unsubscribe();
   }, [userProfile]);
+  
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, "chats"), where("participants", "array-contains", user.uid), orderBy("updatedAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedChats: any[] = [];
+      snapshot.forEach(doc => {
+        fetchedChats.push({ id: doc.id, ...doc.data() });
+      });
+      setChats(fetchedChats);
+    });
+    return () => unsubscribe();
+  }, [user]);
+  
+  useEffect(() => {
+    if (!activeChat) return;
+    const q = query(collection(db, `chats/${activeChat.id}/messages`), orderBy("timestamp", "asc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedMsgs: any[] = [];
+      snapshot.forEach(doc => {
+        fetchedMsgs.push({ id: doc.id, ...doc.data() });
+      });
+      setMessages(fetchedMsgs);
+    });
+    return () => unsubscribe();
+  }, [activeChat]);
+  
+  useEffect(() => {
+    if (activeTab === "my-sploods" && user) {
+      const q = query(collection(db, "alerts"), where("userId", "==", user.uid));
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const fetched: any[] = [];
+        snapshot.forEach(doc => {
+          fetched.push({ id: doc.id, ...doc.data() });
+        });
+        fetched.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setMySploods(fetched);
+      });
+      return () => unsubscribe();
+    }
+  }, [activeTab, user]);
   
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState("");
@@ -136,6 +200,56 @@ export default function App() {
     setAlerts(alerts.filter(a => a.id !== id));
   };
 
+  const handleSplood = async (alert: any) => {
+    if (!user) return;
+    
+    // Check if chat already exists for this alert and these participants
+    const existingChat = chats.find(c => c.alertId === alert.id && c.participants.includes(alert.userId));
+    
+    if (existingChat) {
+      setActiveChat(existingChat);
+      setActiveTab("chat");
+      return;
+    }
+    
+    try {
+      const chatRef = await addDoc(collection(db, "chats"), {
+        alertId: alert.id,
+        restaurant: alert.restaurant,
+        dish: alert.dish,
+        participants: [user.uid, alert.userId],
+        participantNames: {
+          [user.uid]: user.displayName || user.email?.split('@')[0] || "You",
+          [alert.userId]: alert.user
+        },
+        updatedAt: Date.now()
+      });
+      
+      const newChat = { id: chatRef.id, alertId: alert.id, restaurant: alert.restaurant, dish: alert.dish, participants: [user.uid, alert.userId], participantNames: { [user.uid]: user.displayName || user.email?.split('@')[0] || "You", [alert.userId]: alert.user } };
+      setActiveChat(newChat);
+      setActiveTab("chat");
+    } catch (error) {
+      console.error("Error creating chat:", error);
+    }
+  };
+
+  const sendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeChat || !newMessage.trim() || !user) return;
+    
+    try {
+      await addDoc(collection(db, `chats/${activeChat.id}/messages`), {
+        senderId: user.uid,
+        text: newMessage.trim(),
+        timestamp: Date.now()
+      });
+      await setDoc(doc(db, "chats", activeChat.id), { updatedAt: Date.now() }, { merge: true });
+      setNewMessage("");
+    } catch (error) {
+      console.error("Error sending message:", error);
+    }
+  };
+
   const handleBroadcast = async () => {
     if (!restaurant || !dish) return;
     if (!userProfile?.lat || !userProfile?.lng) {
@@ -144,6 +258,20 @@ export default function App() {
     }
     
     try {
+      const userAlertsQuery = query(collection(db, "alerts"), where("userId", "==", user?.uid));
+      const userAlertsSnap = await getDocs(userAlertsQuery);
+      let userAlerts: any[] = [];
+      userAlertsSnap.forEach(doc => userAlerts.push({ id: doc.id, ...doc.data() }));
+      
+      userAlerts.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      
+      if (userAlerts.length >= 3) {
+        const toDeleteCount = userAlerts.length - 2;
+        for (let i = 0; i < toDeleteCount; i++) {
+          await deleteDoc(doc(db, "alerts", userAlerts[i].id));
+        }
+      }
+      
       await addDoc(collection(db, "alerts"), {
         user: user?.displayName || user?.email?.split('@')[0] || "You",
         userId: user?.uid,
@@ -192,6 +320,14 @@ export default function App() {
       setTimeout(() => setProfileMessage(""), 3000);
     } catch (error: any) {
       setProfileMessage("Error updating profile.");
+    }
+  };
+
+  const handleDeleteSplood = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, "alerts", id));
+    } catch (e) {
+      console.error("Error deleting splood: ", e);
     }
   };
 
@@ -284,7 +420,7 @@ export default function App() {
                       </div>
                       <div>
                         <div style={{ fontWeight: 600 }}>{alert.user}</div>
-                        <div className="text-secondary" style={{ fontSize: '0.8rem' }}>{alert.time}</div>
+                        <div className="text-secondary" style={{ fontSize: '0.8rem' }}>{getTimeAgo(alert.createdAt)}</div>
                       </div>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
@@ -302,10 +438,16 @@ export default function App() {
                     <div style={{ color: 'var(--text-secondary)' }}>Wants to split: <span style={{ color: 'white', fontWeight: 500 }}>{alert.dish}</span></div>
                   </div>
                   
-                  <div className="flex gap-2">
-                    <button className="btn-secondary" style={{ flex: 1 }} onClick={() => removeAlert(alert.id)}>Ignore</button>
-                    <button className="btn-primary" style={{ flex: 1 }} onClick={() => { window.alert('Splood request sent!'); removeAlert(alert.id); }}>Splood!</button>
-                  </div>
+                  {alert.userId === user?.uid ? (
+                    <div className="text-center" style={{ color: 'var(--success)', fontWeight: 600, padding: '10px', backgroundColor: 'var(--bg-dark)', borderRadius: '8px' }}>
+                      Your Alert
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <button className="btn-secondary" style={{ flex: 1 }} onClick={() => removeAlert(alert.id)}>Ignore</button>
+                      <button className="btn-primary" style={{ flex: 1 }} onClick={() => handleSplood(alert)}>Splood!</button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -345,9 +487,66 @@ export default function App() {
         )}
 
         {activeTab === "chat" && (
-          <div className="flex-col gap-4 items-center justify-center" style={{ height: '50vh' }}>
-            <ChatIcon />
-            <p className="text-secondary">No active sploods yet.</p>
+          <div className="flex-col gap-4" style={{ height: '100%' }}>
+            {!activeChat ? (
+              <>
+                <h2 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '8px' }}>Your Chats</h2>
+                {chats.length === 0 ? (
+                  <div className="flex-col gap-4 items-center justify-center" style={{ height: '40vh' }}>
+                    <ChatIcon />
+                    <p className="text-secondary">No active chats yet.</p>
+                  </div>
+                ) : (
+                  <div className="flex-col gap-2">
+                    {chats.map(chat => {
+                       const otherUserId = chat.participants.find((p: string) => p !== user?.uid) || "Unknown";
+                       const otherUserName = chat.participantNames?.[otherUserId] || "Someone";
+                       return (
+                         <div key={chat.id} className="card" onClick={() => setActiveChat(chat)} style={{ cursor: 'pointer' }}>
+                           <div style={{ fontWeight: 600 }}>{otherUserName}</div>
+                           <div className="text-secondary" style={{ fontSize: '0.9rem' }}>{chat.restaurant} - {chat.dish}</div>
+                         </div>
+                       );
+                    })}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="flex-col" style={{ height: 'calc(100vh - 180px)' }}>
+                <div className="flex items-center gap-2 mb-4">
+                  <button onClick={() => setActiveChat(null)} style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', padding: '0 8px' }}>
+                    ← Back
+                  </button>
+                  <div style={{ fontWeight: 600 }}>
+                    {activeChat.participantNames?.[activeChat.participants.find((p: string) => p !== user?.uid) || ""] || "Chat"}
+                  </div>
+                </div>
+                
+                <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', padding: '8px', backgroundColor: 'var(--bg-dark)', borderRadius: '8px', marginBottom: '12px' }}>
+                  {messages.map(msg => {
+                    const isMine = msg.senderId === user?.uid;
+                    return (
+                      <div key={msg.id} style={{ alignSelf: isMine ? 'flex-end' : 'flex-start', backgroundColor: isMine ? 'var(--primary)' : 'var(--bg-hover)', color: 'white', padding: '8px 12px', borderRadius: '16px', maxWidth: '80%' }}>
+                        {msg.text}
+                      </div>
+                    );
+                  })}
+                </div>
+                
+                <form onSubmit={sendMessage} className="flex gap-2">
+                  <input 
+                    type="text" 
+                    value={newMessage}
+                    onChange={e => setNewMessage(e.target.value)}
+                    placeholder="Type a message..."
+                    style={{ flex: 1, padding: '12px', borderRadius: '24px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }}
+                  />
+                  <button type="submit" className="btn-primary" style={{ borderRadius: '24px', padding: '0 20px' }}>
+                    Send
+                  </button>
+                </form>
+              </div>
+            )}
           </div>
         )}
 
@@ -404,11 +603,48 @@ export default function App() {
               </form>
               
               <div style={{ marginTop: '24px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '24px' }}>
+                <button className="btn-secondary mb-4" style={{ width: '100%' }} onClick={() => setActiveTab('my-sploods')}>
+                  Manage My Sploods
+                </button>
                 <button className="btn-secondary" style={{ width: '100%', color: 'var(--danger)' }} onClick={logout}>
                   Log Out
                 </button>
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === "my-sploods" && (
+          <div className="flex-col gap-4">
+            <div className="flex items-center gap-2 mb-2">
+              <button onClick={() => setActiveTab('profile')} style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', padding: '0 8px' }}>
+                ← Back
+              </button>
+              <h2 style={{ fontSize: '1.2rem', fontWeight: 600 }}>Manage My Sploods</h2>
+            </div>
+            
+            {mySploods.length === 0 ? (
+              <div className="card text-center text-secondary">
+                You don't have any active sploods.
+              </div>
+            ) : (
+              <div className="flex-col gap-4">
+                {mySploods.map(alert => (
+                  <div key={alert.id} className="card">
+                    <div className="flex justify-between items-center mb-4">
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{alert.restaurant}</div>
+                        <div className="text-secondary" style={{ fontSize: '0.8rem' }}>{getTimeAgo(alert.createdAt)}</div>
+                      </div>
+                      <button className="btn-secondary" style={{ color: 'var(--danger)', padding: '6px 12px' }} onClick={() => handleDeleteSplood(alert.id)}>
+                        Delete
+                      </button>
+                    </div>
+                    <div style={{ color: 'var(--text-secondary)' }}>Wants to split: <span style={{ color: 'white', fontWeight: 500 }}>{alert.dish}</span></div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </main>
