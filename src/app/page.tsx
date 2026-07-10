@@ -40,28 +40,69 @@ const FireIcon = () => (
   </svg>
 );
 
-// Initial Mock Data
-const INITIAL_ALERTS = [
-  { id: 1, user: "Alex M.", restaurant: "Spice Symphony", dish: "Chicken Biryani (Large)", match: 98, distance: "0.4 miles", time: "10 mins ago" },
-  { id: 2, user: "Sam T.", restaurant: "Pizza Paradiso", dish: "Large Pepperoni & Mushroom", match: 85, distance: "1.2 miles", time: "25 mins ago" },
-  { id: 3, user: "Jordan L.", restaurant: "Sushi Zen", dish: "Deluxe Sushi Boat for 2", match: 92, distance: "0.8 miles", time: "1 hour ago" },
-];
-
 import { useAuth } from "@/context/AuthContext";
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
-import { auth } from "@/lib/firebase";
+import { collection, addDoc, doc, setDoc, getDoc, onSnapshot, query, orderBy } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
+import { useEffect } from "react";
+import { calculateDistance, geocodeLocation } from "@/lib/geo";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("feed");
-  const [alerts, setAlerts] = useState(INITIAL_ALERTS);
+  const [alerts, setAlerts] = useState<any[]>([]);
   
   const [restaurant, setRestaurant] = useState("");
   const [dish, setDish] = useState("");
   const [time, setTime] = useState("Now");
   
   const [displayName, setDisplayName] = useState("");
+  const [locationText, setLocationText] = useState("");
+  const [searchRadius, setSearchRadius] = useState(10);
+  const [userProfile, setUserProfile] = useState<any>(null);
+  
   const [profileMessage, setProfileMessage] = useState("");
   const { user, loading, logout } = useAuth();
+
+  useEffect(() => {
+    if (!user) return;
+    const fetchProfile = async () => {
+      const docRef = doc(db, "users", user.uid);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setUserProfile(data);
+        setLocationText(data.locationText || "");
+        setSearchRadius(data.searchRadius || 10);
+      }
+    };
+    fetchProfile();
+  }, [user]);
+
+  useEffect(() => {
+    if (!userProfile?.lat || !userProfile?.lng) {
+      setAlerts([]);
+      return;
+    }
+    
+    const q = query(collection(db, "alerts"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedAlerts: any[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        const dist = calculateDistance(userProfile.lat, userProfile.lng, data.lat, data.lng);
+        
+        if (dist <= userProfile.searchRadius) {
+          fetchedAlerts.push({
+            id: doc.id,
+            ...data,
+            distanceStr: dist < 0.1 ? "Very close" : `${dist.toFixed(1)} miles away`
+          });
+        }
+      });
+      setAlerts(fetchedAlerts);
+    });
+    return () => unsubscribe();
+  }, [userProfile]);
   
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState("");
@@ -82,33 +123,72 @@ export default function App() {
     }
   };
 
-  const removeAlert = (id: number) => {
+  const removeAlert = (id: string) => {
     setAlerts(alerts.filter(a => a.id !== id));
   };
 
-  const handleBroadcast = () => {
+  const handleBroadcast = async () => {
     if (!restaurant || !dish) return;
-    const newAlert = {
-      id: Date.now(),
-      user: user?.displayName || user?.email?.split('@')[0] || "You",
-      restaurant,
-      dish,
-      match: 100,
-      distance: "0.0 miles",
-      time: "Just now"
-    };
-    setAlerts([newAlert, ...alerts]);
-    setRestaurant("");
-    setDish("");
-    setTime("Now");
-    setActiveTab("feed");
+    if (!userProfile?.lat || !userProfile?.lng) {
+       window.alert("Please complete your profile location before broadcasting!");
+       return;
+    }
+    
+    try {
+      await addDoc(collection(db, "alerts"), {
+        user: user?.displayName || user?.email?.split('@')[0] || "You",
+        userId: user?.uid,
+        restaurant,
+        dish,
+        time,
+        match: 100,
+        lat: userProfile.lat,
+        lng: userProfile.lng,
+        createdAt: Date.now()
+      });
+      
+      setRestaurant("");
+      setDish("");
+      setTime("Now");
+      setActiveTab("feed");
+    } catch (e) {
+      console.error("Error adding document: ", e);
+    }
   };
 
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
     try {
+      setProfileMessage("Saving...");
+      
+      let lat = userProfile?.lat;
+      let lng = userProfile?.lng;
+      
+      if (locationText !== userProfile?.locationText || !lat || !lng) {
+         const coords = await geocodeLocation(locationText);
+         if (coords) {
+           lat = coords.lat;
+           lng = coords.lng;
+         } else {
+           setProfileMessage("Could not find that location.");
+           return;
+         }
+      }
+      
       await updateProfile(user, { displayName: displayName || user.displayName || "" });
+      
+      const newProfile = {
+        displayName: displayName || user.displayName || "",
+        locationText,
+        searchRadius: Number(searchRadius),
+        lat,
+        lng
+      };
+      
+      await setDoc(doc(db, "users", user.uid), newProfile, { merge: true });
+      setUserProfile(newProfile);
+      
       setProfileMessage("Profile updated successfully!");
       setTimeout(() => setProfileMessage(""), 3000);
     } catch (error: any) {
@@ -189,6 +269,12 @@ export default function App() {
           <div className="flex-col gap-4">
             <h2 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '8px' }}>Nearby Sploods</h2>
             
+            {!userProfile?.lat && (
+              <div className="card text-center" style={{ color: 'var(--primary)' }}>
+                Please set your location in the Profile tab to see nearby sploods!
+              </div>
+            )}
+            
             <div className="flex-col gap-4">
               {alerts.map(alert => (
                 <div key={alert.id} className="card">
@@ -207,7 +293,7 @@ export default function App() {
                          <FireIcon /> {alert.match}% Match
                        </div>
                        <div className="text-secondary" style={{ fontSize: '0.8rem' }}>
-                         <LocationIcon /> {alert.distance}
+                         <LocationIcon /> {alert.distanceStr || "Nearby"}
                        </div>
                     </div>
                   </div>
@@ -287,6 +373,29 @@ export default function App() {
                     onChange={(e) => setDisplayName(e.target.value)} 
                     placeholder="Enter display name" 
                     style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} 
+                  />
+                </div>
+                
+                <div>
+                  <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Location (City, Zip)</label>
+                  <input 
+                    type="text" 
+                    value={locationText} 
+                    onChange={(e) => setLocationText(e.target.value)} 
+                    placeholder="e.g. Brooklyn, NY" 
+                    required
+                    style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} 
+                  />
+                </div>
+                
+                <div>
+                  <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Search Radius ({searchRadius} miles)</label>
+                  <input 
+                    type="range" 
+                    min="1" max="100" 
+                    value={searchRadius} 
+                    onChange={(e) => setSearchRadius(Number(e.target.value))} 
+                    style={{ width: '100%' }} 
                   />
                 </div>
                 
