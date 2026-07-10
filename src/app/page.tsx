@@ -45,7 +45,10 @@ import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfi
 import { collection, addDoc, doc, setDoc, getDoc, onSnapshot, query, orderBy } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useEffect } from "react";
-import { calculateDistance, geocodeLocation } from "@/lib/geo";
+import { calculateDistance } from "@/lib/geo";
+import dynamic from "next/dynamic";
+
+const MapPicker = dynamic(() => import("@/components/MapPicker"), { ssr: false });
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("feed");
@@ -56,9 +59,12 @@ export default function App() {
   const [time, setTime] = useState("Now");
   
   const [displayName, setDisplayName] = useState("");
-  const [locationText, setLocationText] = useState("");
   const [searchRadius, setSearchRadius] = useState(10);
   const [userProfile, setUserProfile] = useState<any>(null);
+  
+  // Temporary state for the map picker before saving
+  const [mapLat, setMapLat] = useState<number | null>(null);
+  const [mapLng, setMapLng] = useState<number | null>(null);
   
   const [profileMessage, setProfileMessage] = useState("");
   const { user, loading, logout } = useAuth();
@@ -71,7 +77,10 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         setUserProfile(data);
-        setLocationText(data.locationText || "");
+        if (data.lat && data.lng) {
+          setMapLat(data.lat);
+          setMapLng(data.lng);
+        }
         setSearchRadius(data.searchRadius || 10);
       }
     };
@@ -162,28 +171,18 @@ export default function App() {
     try {
       setProfileMessage("Saving...");
       
-      let lat = userProfile?.lat;
-      let lng = userProfile?.lng;
-      
-      if (locationText !== userProfile?.locationText || !lat || !lng) {
-         const coords = await geocodeLocation(locationText);
-         if (coords) {
-           lat = coords.lat;
-           lng = coords.lng;
-         } else {
-           setProfileMessage("Could not find that location.");
-           return;
-         }
+      if (!mapLat || !mapLng) {
+        setProfileMessage("Please select a location on the map.");
+        return;
       }
       
       await updateProfile(user, { displayName: displayName || user.displayName || "" });
       
       const newProfile = {
         displayName: displayName || user.displayName || "",
-        locationText,
         searchRadius: Number(searchRadius),
-        lat,
-        lng
+        lat: mapLat,
+        lng: mapLng
       };
       
       await setDoc(doc(db, "users", user.uid), newProfile, { merge: true });
@@ -377,14 +376,14 @@ export default function App() {
                 </div>
                 
                 <div>
-                  <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Location (City, Zip)</label>
-                  <input 
-                    type="text" 
-                    value={locationText} 
-                    onChange={(e) => setLocationText(e.target.value)} 
-                    placeholder="e.g. Brooklyn, NY" 
-                    required
-                    style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} 
+                  <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Pinpoint your location</label>
+                  <MapPicker 
+                    initialLat={userProfile?.lat} 
+                    initialLng={userProfile?.lng} 
+                    onLocationChange={(lat, lng) => {
+                      setMapLat(lat);
+                      setMapLng(lng);
+                    }} 
                   />
                 </div>
                 
