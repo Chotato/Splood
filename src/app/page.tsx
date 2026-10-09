@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 
 // Icons (Mock SVGs)
 const HomeIcon = () => (
@@ -34,7 +34,7 @@ const LocationIcon = () => (
 );
 
 const FireIcon = () => (
-  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16" style={{ display: 'inline', verticalAlign: 'text-bottom', color: 'var(--primary)' }}>
+  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14" style={{ display: 'inline', verticalAlign: 'text-bottom', color: 'var(--success)' }}>
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z"></path>
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.879 16.121A3 3 0 1012.015 11L11 14H9c0 .768.293 1.536.879 2.121z"></path>
   </svg>
@@ -44,7 +44,6 @@ import { useAuth } from "@/context/AuthContext";
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
 import { collection, addDoc, doc, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, query, orderBy, where } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
-import { useEffect } from "react";
 import { calculateDistance } from "@/lib/geo";
 import dynamic from "next/dynamic";
 
@@ -85,17 +84,43 @@ export default function App() {
   const [newMessage, setNewMessage] = useState("");
   const [mySploods, setMySploods] = useState<any[]>([]);
   
+  // Notification and badge state
+  const [incomingMatch, setIncomingMatch] = useState<{
+    chat: any;
+    otherUserName: string;
+    restaurant: string;
+    dish: string;
+  } | null>(null);
+  const [hasUnreadChat, setHasUnreadChat] = useState(false);
+  const knownChatIdsRef = useRef<Set<string>>(new Set());
+  const isInitialChatLoadRef = useRef(true);
+  const activeChatRef = useRef<any>(null);
+  activeChatRef.current = activeChat;
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+  
   const [profileMessage, setProfileMessage] = useState("");
   const { user, loading, logout } = useAuth();
 
   useEffect(() => {
     if (!user) return;
+    if (user.displayName) {
+      setDisplayName(user.displayName);
+    }
     const fetchProfile = async () => {
       const docRef = doc(db, "users", user.uid);
       const docSnap = await getDoc(docRef);
       if (docSnap.exists()) {
         const data = docSnap.data();
         setUserProfile(data);
+        if (data.displayName) {
+          setDisplayName(data.displayName);
+        } else if (user.displayName) {
+          setDisplayName(user.displayName);
+        }
         if (data.lat && data.lng) {
           setMapLat(data.lat);
           setMapLng(data.lng);
@@ -138,14 +163,62 @@ export default function App() {
   
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, "chats"), where("participants", "array-contains", user.uid), orderBy("updatedAt", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedChats: any[] = [];
-      snapshot.forEach(doc => {
-        fetchedChats.push({ id: doc.id, ...doc.data() });
-      });
-      setChats(fetchedChats);
-    });
+    // Query without orderBy in Firestore to avoid requiring a composite index.
+    // Client-side sorting is used instead, matching the pattern in mySploods.
+    const q = query(
+      collection(db, "chats"),
+      where("participants", "array-contains", user.uid)
+    );
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const fetchedChats: any[] = [];
+        snapshot.forEach((doc) => {
+          fetchedChats.push({ id: doc.id, ...doc.data() });
+        });
+        fetchedChats.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        if (isInitialChatLoadRef.current) {
+          fetchedChats.forEach((c) => knownChatIdsRef.current.add(c.id));
+          isInitialChatLoadRef.current = false;
+        } else {
+          // Detect incoming matches or new messages from others
+          for (const c of fetchedChats) {
+            if (!knownChatIdsRef.current.has(c.id)) {
+              knownChatIdsRef.current.add(c.id);
+              // If someone else created this chat with us
+              if (c.createdBy !== user.uid) {
+                const otherUserId =
+                  c.participants?.find((p: string) => p !== user.uid) || "";
+                const otherUserName =
+                  c.participantNames?.[otherUserId] || "Someone";
+                setIncomingMatch({
+                  chat: c,
+                  otherUserName,
+                  restaurant: c.restaurant,
+                  dish: c.dish,
+                });
+                setHasUnreadChat(true);
+              }
+            } else {
+              // Existing chat: if a new message was sent by the other user and not currently open
+              if (
+                c.lastSenderId &&
+                c.lastSenderId !== user.uid &&
+                (!activeChatRef.current || activeChatRef.current.id !== c.id)
+              ) {
+                setHasUnreadChat(true);
+              }
+            }
+          }
+        }
+
+        setChats(fetchedChats);
+      },
+      (error) => {
+        console.error("Error fetching chats:", error);
+      }
+    );
     return () => unsubscribe();
   }, [user]);
   
@@ -209,11 +282,12 @@ export default function App() {
     if (existingChat) {
       setActiveChat(existingChat);
       setActiveTab("chat");
+      setHasUnreadChat(false);
       return;
     }
     
     try {
-      const chatRef = await addDoc(collection(db, "chats"), {
+      const chatData = {
         alertId: alert.id,
         restaurant: alert.restaurant,
         dish: alert.dish,
@@ -222,12 +296,18 @@ export default function App() {
           [user.uid]: user.displayName || user.email?.split('@')[0] || "You",
           [alert.userId]: alert.user
         },
+        createdBy: user.uid,
+        createdAt: Date.now(),
         updatedAt: Date.now()
-      });
+      };
+
+      const chatRef = await addDoc(collection(db, "chats"), chatData);
       
-      const newChat = { id: chatRef.id, alertId: alert.id, restaurant: alert.restaurant, dish: alert.dish, participants: [user.uid, alert.userId], participantNames: { [user.uid]: user.displayName || user.email?.split('@')[0] || "You", [alert.userId]: alert.user } };
+      const newChat = { id: chatRef.id, ...chatData };
+      knownChatIdsRef.current.add(chatRef.id);
       setActiveChat(newChat);
       setActiveTab("chat");
+      setHasUnreadChat(false);
     } catch (error) {
       console.error("Error creating chat:", error);
     }
@@ -238,13 +318,22 @@ export default function App() {
     if (!activeChat || !newMessage.trim() || !user) return;
     
     try {
+      const text = newMessage.trim();
+      setNewMessage("");
       await addDoc(collection(db, `chats/${activeChat.id}/messages`), {
         senderId: user.uid,
-        text: newMessage.trim(),
+        text,
         timestamp: Date.now()
       });
-      await setDoc(doc(db, "chats", activeChat.id), { updatedAt: Date.now() }, { merge: true });
-      setNewMessage("");
+      await setDoc(
+        doc(db, "chats", activeChat.id),
+        {
+          updatedAt: Date.now(),
+          lastMessage: text,
+          lastSenderId: user.uid
+        },
+        { merge: true }
+      );
     } catch (error) {
       console.error("Error sending message:", error);
     }
@@ -304,10 +393,11 @@ export default function App() {
         return;
       }
       
-      await updateProfile(user, { displayName: displayName || user.displayName || "" });
+      const trimmedName = displayName.trim();
+      await updateProfile(user, { displayName: trimmedName });
       
       const newProfile = {
-        displayName: displayName || user.displayName || "",
+        displayName: trimmedName,
         searchRadius: Number(searchRadius),
         lat: mapLat,
         lng: mapLng
@@ -390,13 +480,50 @@ export default function App() {
 
   return (
     <>
+      {/* Incoming Splood Match Modal Banner */}
+      {incomingMatch && (
+        <div className="match-banner-backdrop">
+          <div className="match-banner-card">
+            <div className="flex items-center gap-3">
+              <div className="match-icon-badge">🎉</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: "1.05rem", color: "white" }}>
+                  Splood Match Found!
+                </div>
+                <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginTop: "2px" }}>
+                  <strong style={{ color: "var(--primary)" }}>{incomingMatch.otherUserName}</strong> accepted your request for{" "}
+                  <strong style={{ color: "white" }}>{incomingMatch.dish}</strong> at{" "}
+                  <strong style={{ color: "white" }}>{incomingMatch.restaurant}</strong>!
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                className="btn-secondary"
+                style={{ flex: 1, padding: "10px", fontSize: "0.9rem" }}
+                onClick={() => setIncomingMatch(null)}
+              >
+                Later
+              </button>
+              <button
+                className="btn-primary"
+                style={{ flex: 1, padding: "10px", fontSize: "0.9rem" }}
+                onClick={() => {
+                  setActiveChat(incomingMatch.chat);
+                  setActiveTab("chat");
+                  setHasUnreadChat(false);
+                  setIncomingMatch(null);
+                }}
+              >
+                Chat Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className="glass-header">
         <div className="logo-text">SPLOOD</div>
-        {activeTab !== 'profile' && (
-           <button className="btn-secondary" style={{ padding: '8px', borderRadius: '50%' }} onClick={() => setActiveTab('profile')}>
-             <ProfileIcon />
-           </button>
-        )}
       </header>
 
       <main className="p-4" style={{ minHeight: 'calc(100vh - 140px)' }}>
@@ -414,17 +541,17 @@ export default function App() {
               {alerts.map(alert => (
                 <div key={alert.id} className="card">
                   <div className="flex justify-between items-center mb-4">
-                    <div className="flex items-center gap-2">
-                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'var(--bg-hover)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        {alert.user.charAt(0)}
+                    <div className="flex items-center gap-3">
+                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'var(--bg-hover)', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, color: 'var(--primary)' }}>
+                        {alert.user.charAt(0).toUpperCase()}
                       </div>
                       <div>
                         <div style={{ fontWeight: 600 }}>{alert.user}</div>
                         <div className="text-secondary" style={{ fontSize: '0.8rem' }}>{getTimeAgo(alert.createdAt)}</div>
                       </div>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                       <div style={{ color: 'var(--success)', fontWeight: 600, fontSize: '0.9rem' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                       <div style={{ color: 'var(--success)', fontWeight: 600, fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', backgroundColor: 'var(--success-bg)', border: '1px solid var(--success-border)', padding: '3px 8px', borderRadius: 'var(--radius-full)' }}>
                          <FireIcon /> {alert.match}% Match
                        </div>
                        <div className="text-secondary" style={{ fontSize: '0.8rem' }}>
@@ -433,13 +560,13 @@ export default function App() {
                     </div>
                   </div>
                   
-                  <div style={{ backgroundColor: 'var(--bg-hover)', padding: '12px', borderRadius: '8px', marginBottom: '16px' }}>
-                    <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--primary)' }}>{alert.restaurant}</div>
-                    <div style={{ color: 'var(--text-secondary)' }}>Wants to split: <span style={{ color: 'white', fontWeight: 500 }}>{alert.dish}</span></div>
+                  <div style={{ backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-subtle)', padding: '12px 14px', borderRadius: 'var(--radius-sm)', marginBottom: '16px' }}>
+                    <div style={{ fontWeight: 700, fontSize: '1.05rem', color: 'var(--primary)' }}>{alert.restaurant}</div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '2px' }}>Wants to split: <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{alert.dish}</span></div>
                   </div>
                   
                   {alert.userId === user?.uid ? (
-                    <div className="text-center" style={{ color: 'var(--success)', fontWeight: 600, padding: '10px', backgroundColor: 'var(--bg-dark)', borderRadius: '8px' }}>
+                    <div className="text-center" style={{ color: 'var(--text-secondary)', fontWeight: 500, padding: '10px', backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', fontSize: '0.9rem' }}>
                       Your Alert
                     </div>
                   ) : (
@@ -499,12 +626,34 @@ export default function App() {
                 ) : (
                   <div className="flex-col gap-2">
                     {chats.map(chat => {
-                       const otherUserId = chat.participants.find((p: string) => p !== user?.uid) || "Unknown";
+                       const otherUserId = chat.participants?.find((p: string) => p !== user?.uid) || "Unknown";
                        const otherUserName = chat.participantNames?.[otherUserId] || "Someone";
                        return (
-                         <div key={chat.id} className="card" onClick={() => setActiveChat(chat)} style={{ cursor: 'pointer' }}>
-                           <div style={{ fontWeight: 600 }}>{otherUserName}</div>
-                           <div className="text-secondary" style={{ fontSize: '0.9rem' }}>{chat.restaurant} - {chat.dish}</div>
+                         <div
+                           key={chat.id}
+                           className="card"
+                           onClick={() => {
+                             setActiveChat(chat);
+                             setHasUnreadChat(false);
+                           }}
+                           style={{ cursor: 'pointer' }}
+                         >
+                           <div className="flex justify-between items-center">
+                             <div style={{ fontWeight: 600 }}>{otherUserName}</div>
+                             {chat.updatedAt && (
+                               <div className="text-secondary" style={{ fontSize: '0.75rem' }}>
+                                 {getTimeAgo(chat.updatedAt)}
+                               </div>
+                             )}
+                           </div>
+                           <div className="text-secondary" style={{ fontSize: '0.85rem', marginTop: '2px' }}>
+                             {chat.restaurant} • <span style={{ color: 'white' }}>{chat.dish}</span>
+                           </div>
+                           {chat.lastMessage && (
+                             <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                               {chat.lastSenderId === user?.uid ? "You: " : ""}{chat.lastMessage}
+                             </div>
+                           )}
                          </div>
                        );
                     })}
@@ -513,24 +662,55 @@ export default function App() {
               </>
             ) : (
               <div className="flex-col" style={{ height: 'calc(100vh - 180px)' }}>
-                <div className="flex items-center gap-2 mb-4">
-                  <button onClick={() => setActiveChat(null)} style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', padding: '0 8px' }}>
-                    ← Back
+                <div className="flex items-center gap-3 mb-4">
+                  <button onClick={() => setActiveChat(null)} style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', padding: '0 8px', fontSize: '1.2rem' }}>
+                    ←
                   </button>
-                  <div style={{ fontWeight: 600 }}>
-                    {activeChat.participantNames?.[activeChat.participants.find((p: string) => p !== user?.uid) || ""] || "Chat"}
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: '1.05rem' }}>
+                      {activeChat.participantNames?.[activeChat.participants?.find((p: string) => p !== user?.uid) || ""] || "Chat"}
+                    </div>
+                    <div className="text-secondary" style={{ fontSize: '0.8rem' }}>
+                      {activeChat.restaurant} • {activeChat.dish}
+                    </div>
                   </div>
                 </div>
                 
-                <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', padding: '8px', backgroundColor: 'var(--bg-dark)', borderRadius: '8px', marginBottom: '12px' }}>
-                  {messages.map(msg => {
-                    const isMine = msg.senderId === user?.uid;
-                    return (
-                      <div key={msg.id} style={{ alignSelf: isMine ? 'flex-end' : 'flex-start', backgroundColor: isMine ? 'var(--primary)' : 'var(--bg-hover)', color: 'white', padding: '8px 12px', borderRadius: '16px', maxWidth: '80%' }}>
-                        {msg.text}
-                      </div>
-                    );
-                  })}
+                <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px', backgroundColor: 'var(--bg-dark)', borderRadius: '12px', marginBottom: '12px' }}>
+                  {messages.length === 0 ? (
+                    <div className="text-center text-secondary" style={{ margin: 'auto', fontSize: '0.9rem' }}>
+                      Say hello and coordinate where to meet! 👋
+                    </div>
+                  ) : (
+                    messages.map(msg => {
+                      const isMine = msg.senderId === user?.uid;
+                      return (
+                        <div
+                          key={msg.id}
+                          style={{
+                            alignSelf: isMine ? 'flex-end' : 'flex-start',
+                            backgroundColor: isMine ? 'var(--primary)' : 'var(--bg-hover)',
+                            color: isMine ? 'var(--primary-text)' : 'var(--text-primary)',
+                            padding: '8px 14px',
+                            borderRadius: '16px',
+                            maxWidth: '80%',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '2px',
+                            fontWeight: isMine ? 500 : 400
+                          }}
+                        >
+                          <div>{msg.text}</div>
+                          {msg.timestamp && (
+                            <div style={{ fontSize: '0.65rem', color: isMine ? 'rgba(18, 16, 28, 0.65)' : 'var(--text-secondary)', alignSelf: isMine ? 'flex-end' : 'flex-start' }}>
+                              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                  <div ref={messagesEndRef} />
                 </div>
                 
                 <form onSubmit={sendMessage} className="flex gap-2">
@@ -539,7 +719,7 @@ export default function App() {
                     value={newMessage}
                     onChange={e => setNewMessage(e.target.value)}
                     placeholder="Type a message..."
-                    style={{ flex: 1, padding: '12px', borderRadius: '24px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }}
+                    style={{ flex: 1, padding: '12px 16px', borderRadius: '24px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }}
                   />
                   <button type="submit" className="btn-primary" style={{ borderRadius: '24px', padding: '0 20px' }}>
                     Send
@@ -567,10 +747,9 @@ export default function App() {
                   <label className="text-secondary" style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Display Name</label>
                   <input 
                     type="text" 
-                    value={displayName || user?.displayName || ""} 
+                    value={displayName} 
                     onChange={(e) => setDisplayName(e.target.value)} 
                     placeholder="Enter display name" 
-                    style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-dark)', color: 'white', outline: 'none' }} 
                   />
                 </div>
                 
@@ -655,13 +834,16 @@ export default function App() {
           <span>Feed</span>
         </button>
         <button className={`nav-item ${activeTab === 'create' ? 'active' : ''}`} onClick={() => setActiveTab('create')}>
-          <div style={{ backgroundColor: 'var(--primary)', padding: '10px', borderRadius: '50%', color: 'white', marginTop: '-20px', boxShadow: '0 4px 10px rgba(255, 87, 34, 0.4)' }}>
+          <div className="splood-fab">
             <PlusIcon />
           </div>
-          <span style={{ marginTop: '4px' }}>Splood</span>
+          <span>Splood</span>
         </button>
-        <button className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
-          <ChatIcon />
+        <button className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => { setActiveTab('chat'); setHasUnreadChat(false); }}>
+          <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <ChatIcon />
+            {hasUnreadChat && <span className="unread-dot" />}
+          </div>
           <span>Chat</span>
         </button>
         <button className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => setActiveTab('profile')}>
